@@ -1,0 +1,31 @@
+# Пример манифеста правил. Скопируйте в rules.yaml.
+# Относительные пути в filter_file считаются от расположения этого файла.
+
+rules:
+  # Правило «ключ + модель»: применяется только при точном совпадении
+  # ключа из Authorization и поля model в теле запроса.
+  - key: "sk-test"
+    model: "gpt-4o-mini"
+    priority: 10
+    filter_inline: |
+      .messages = (.messages | safe_truncate_blocks($keep_last))
+    vars:
+      keep_last: 4
+
+  # Правило только по ключу: применяется, когда нет ни одного правила
+  # «ключ + модель» с совпавшей моделью.
+  - key: "sk-test"
+    priority: 20
+    filter_file: "filters/strip_tool_descriptions.jq"
+
+  # Ещё один ключ: заменить системный промпт, если он есть.
+  - key: "sk-another"
+    priority: 0
+    filter_inline: |
+      if .system_prompt then .system_prompt = "compact prompt" else . end
+
+  # Удаление конкретного инструмента по имени через переменную.
+  - key: "sk-tools"
+    filter_file: "filters/remove_tool_by_name.jq"
+    vars:
+      tool_name: "expensive_tool"

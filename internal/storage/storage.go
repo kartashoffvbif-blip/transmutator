@@ -38,7 +38,10 @@ func NewFileStore(path string) *FileStore {
 	return &FileStore{path: path}
 }
 
-// manifestRule — правило в формате YAML-манифеста.
+// manifestRule — правило в формате YAML-манифеста. Кроме полного вида
+// (key + ровно один фильтр) поддерживается групповая запись: key/model
+// плюс список filters, каждый элемент которого разворачивается в
+// отдельное правило с общим ключом и моделью.
 type manifestRule struct {
 	Key          string         `yaml:"key"`
 	Model        string         `yaml:"model"`
@@ -46,6 +49,7 @@ type manifestRule struct {
 	FilterFile   string         `yaml:"filter_file"`
 	FilterInline *string        `yaml:"filter_inline"`
 	Vars         map[string]any `yaml:"vars"`
+	Filters      []manifestRule `yaml:"filters"`
 }
 
 type manifest struct {
@@ -76,11 +80,11 @@ func (s *FileStore) Load() ([]rules.Rule, error) {
 	base := filepath.Dir(s.path)
 	out := make([]rules.Rule, 0, len(m.Rules))
 	for i, mr := range m.Rules {
-		r, err := s.buildRule(base, i, mr)
+		rs, err := s.buildRule(base, i, mr)
 		if err != nil {
 			return nil, fmt.Errorf("правило #%d в %s: %w", i+1, s.path, err)
 		}
-		out = append(out, r)
+		out = append(out, rs...)
 	}
 	// полная проверка: каждый фильтр обязан компилироваться с переменными
 	for _, r := range out {
@@ -91,10 +95,44 @@ func (s *FileStore) Load() ([]rules.Rule, error) {
 	return out, nil
 }
 
-func (s *FileStore) buildRule(base string, idx int, mr manifestRule) (rules.Rule, error) {
+// buildRule разворачивает запись манифеста в одно или несколько правил:
+// групповая форма (key + filters) даёт по правилу на каждый элемент
+// списка, обычная — ровно одно.
+func (s *FileStore) buildRule(base string, idx int, mr manifestRule) ([]rules.Rule, error) {
 	if strings.TrimSpace(mr.Key) == "" {
-		return rules.Rule{}, fmt.Errorf("key обязателен и не может быть пустым")
+		return nil, fmt.Errorf("key обязателен и не может быть пустым")
 	}
+	if len(mr.Filters) == 0 {
+		r, err := s.buildOne(base, fmt.Sprintf("#%d", idx+1), mr.Key, mr.Model, mr)
+		if err != nil {
+			return nil, err
+		}
+		return []rules.Rule{r}, nil
+	}
+	// Групповая форма: у группы не должно быть собственных фильтра,
+	// приоритета и переменных — они задаются в каждом элементе filters.
+	if mr.FilterFile != "" || mr.FilterInline != nil {
+		return nil, fmt.Errorf("групповая запись (filters) не может одновременно задавать filter_file/filter_inline на уровне группы")
+	}
+	if mr.Priority != nil || len(mr.Vars) > 0 {
+		return nil, fmt.Errorf("priority и vars задаются в каждом элементе filters, а не на уровне группы")
+	}
+	out := make([]rules.Rule, 0, len(mr.Filters))
+	for j, sub := range mr.Filters {
+		if strings.TrimSpace(sub.Key) != "" || sub.Model != "" {
+			return nil, fmt.Errorf("элемент filters #%d: key/model наследуются от группы и не задаются внутри", j+1)
+		}
+		r, err := s.buildOne(base, fmt.Sprintf("#%d.%d", idx+1, j+1), mr.Key, mr.Model, sub)
+		if err != nil {
+			return nil, fmt.Errorf("элемент filters #%d: %w", j+1, err)
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// buildOne строит одно правило по готовым key/model и записи с фильтром.
+func (s *FileStore) buildOne(base, label, key, model string, mr manifestRule) (rules.Rule, error) {
 	filter, origin, err := s.resolveFilter(base, mr)
 	if err != nil {
 		return rules.Rule{}, err
@@ -104,11 +142,11 @@ func (s *FileStore) buildRule(base string, idx int, mr manifestRule) (rules.Rule
 		return rules.Rule{}, err
 	}
 	r := rules.Rule{
-		Key:    mr.Key,
-		Model:  mr.Model, // пустая строка — правило только по ключу
+		Key:    key,
+		Model:  model, // пустая строка — правило только по ключу
 		Filter: filter,
 		Vars:   vars,
-		Origin: fmt.Sprintf("#%d (key=%q, model=%q, приоритет=%d, %s)", idx+1, mr.Key, mr.Model, prio(mr), origin),
+		Origin: fmt.Sprintf("%s (key=%q, model=%q, приоритет=%d, %s)", label, key, model, prio(mr), origin),
 	}
 	if mr.Priority != nil {
 		r.Priority = *mr.Priority

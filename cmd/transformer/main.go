@@ -39,7 +39,13 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("конфигурация: %w", err)
 	}
-	logger := logging.New(cfg.Debug)
+	logger, logCloser, err := logging.New(cfg.Debug, cfg.LogFile)
+	if err != nil {
+		return fmt.Errorf("лог-файл: %w", err)
+	}
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
 
 	// 2. правила: загрузка и полная проверка при старте
 	ruleList, err := storage.NewFileStore(cfg.RulesFile).Load()
@@ -56,11 +62,17 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("upstream_url: %w", err)
 	}
+	if cfg.TraceDir != "" {
+		if err := os.MkdirAll(cfg.TraceDir, 0o755); err != nil {
+			return fmt.Errorf("каталог трассировки: %w", err)
+		}
+	}
 	handler := &httpapi.Handler{
 		Proxy:  proxy.New(upstream),
 		Engine: engine,
 		Logger: logger,
 		Debug:  cfg.Debug,
+		Tracer: logging.NewTracer(cfg.TraceDir),
 	}
 
 	// 4. HTTP-сервер с аккуратным завершением по SIGINT/SIGTERM
@@ -82,6 +94,8 @@ func run() error {
 		"upstream", cfg.UpstreamURL,
 		"rules", len(ruleList),
 		"debug", cfg.Debug,
+		"log_file", cfg.LogFile,
+		"trace_dir", cfg.TraceDir,
 	)
 
 	stop := make(chan os.Signal, 1)

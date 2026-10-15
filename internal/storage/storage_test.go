@@ -183,3 +183,69 @@ func TestLoadFilterFileRelativeToManifest(t *testing.T) {
 		t.Errorf("фильтр = %q", rs[0].Filter)
 	}
 }
+
+func TestLoadGroupFilters(t *testing.T) {
+	m := `
+rules:
+  - key: "sk-group"
+    model: "m1"
+    filters:
+      - priority: 1
+        filter_file: "filters/a.jq"
+      - priority: 2
+        filter_inline: |
+          .x = 1
+`
+	path := writeRules(t, m, map[string]string{"filters/a.jq": validFilter})
+	rs, err := NewFileStore(path).Load()
+	if err != nil {
+		t.Fatalf("не ожидал ошибку: %v", err)
+	}
+	if len(rs) != 2 {
+		t.Fatalf("загружено %d правил, ожидалось 2", len(rs))
+	}
+	if rs[0].Key != "sk-group" || rs[0].Model != "m1" || rs[0].Priority != 1 {
+		t.Errorf("первое правило: key=%q model=%q prio=%d", rs[0].Key, rs[0].Model, rs[0].Priority)
+	}
+	if rs[1].Priority != 2 || rs[1].Model != "m1" {
+		t.Errorf("второе правило: prio=%d model=%q", rs[1].Priority, rs[1].Model)
+	}
+}
+
+func TestLoadGroupFiltersInvalid(t *testing.T) {
+	cases := map[string]string{
+		"фильтр на уровне группы": `
+rules:
+  - key: "k"
+    filter_file: "filters/a.jq"
+    filters:
+      - filter_inline: ".x = 1"
+`,
+		"priority на уровне группы": `
+rules:
+  - key: "k"
+    priority: 5
+    filters:
+      - filter_inline: ".x = 1"
+`,
+		"key внутри элемента": `
+rules:
+  - key: "k"
+    filters:
+      - key: "other"
+        filter_inline: ".x = 1"
+`,
+		"пустой элемент": `
+rules:
+  - key: "k"
+    filters:
+      - {}
+`,
+	}
+	for name, m := range cases {
+		path := writeRules(t, m, map[string]string{"filters/a.jq": validFilter})
+		if _, err := NewFileStore(path).Load(); err == nil {
+			t.Errorf("%s: ожидалась ошибка, получен успех", name)
+		}
+	}
+}

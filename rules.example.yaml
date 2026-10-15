@@ -29,3 +29,15 @@ rules:
     filter_file: "filters/remove_tool_by_name.jq"
     vars:
       tool_name: "expensive_tool"
+
+  # Групповая запись: одно правило с ключом (и опционально моделью),
+  # несколько фильтров с индивидуальными приоритетами. Каждый элемент
+  # filters разворачивается в отдельное правило с общим key/model;
+  # выполняются по возрастанию priority. key/model/фильтр группы
+  # внутри элементов не задаются; priority и vars — только в элементах.
+  - key: "sk-zcode"
+    filters:
+      - priority: 1
+        filter_file: "my_rules/skills_list_rewriter.jq"
+      - priority: 2
+        filter_file: "my_rules/system_prompt_optimizer.jq"

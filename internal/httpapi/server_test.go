@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kartashoffvbif-blip/transmutator/internal/logging"
 	"github.com/kartashoffvbif-blip/transmutator/internal/proxy"
 	"github.com/kartashoffvbif-blip/transmutator/internal/storage"
 	"github.com/kartashoffvbif-blip/transmutator/internal/testhelpers"
@@ -599,7 +600,7 @@ func engineOrDie(t *testing.T, manifest string, timeout time.Duration) *transfor
 }
 
 // newLoggedService — сервис с перехватом логов для проверки режимов логирования.
-func newLoggedService(t *testing.T, level slog.Level, debug bool, manifest string, up *testhelpers.Upstream) (*httptest.Server, *lockedBuffer) {
+func newLoggedService(t *testing.T, level slog.Level, debug bool, manifest string, up *testhelpers.Upstream, tracer *logging.Tracer) (*httptest.Server, *lockedBuffer) {
 	t.Helper()
 	var buf lockedBuffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level}))
@@ -609,6 +610,7 @@ func newLoggedService(t *testing.T, level slog.Level, debug bool, manifest strin
 		Engine: engineOrDie(t, manifest, time.Second),
 		Logger: logger,
 		Debug:  debug,
+		Tracer: tracer,
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
@@ -619,31 +621,79 @@ func newLoggedService(t *testing.T, level slog.Level, debug bool, manifest strin
 func TestDebugLoggingShowsOriginalTransformedAndDiff(t *testing.T) {
 	up := testhelpers.NewUpstream(nil)
 	manifest := "rules:\n  - key: \"sk-test\"\n    filter_inline: '.messages = (.messages | safe_truncate_blocks(1))'\n"
-	srv, buf := newLoggedService(t, slog.LevelDebug, true, manifest, up)
+	srv, buf := newLoggedService(t, slog.LevelDebug, true, manifest, up, logging.NewTracer(t.TempDir()))
 
 	_, _ = post(t, srv, "Bearer sk-test", chatBody(3))
 	logs := buf.String()
 	for _, want := range []string{
-		"original_body",    // исходный запрос
-		"transformed_body", // преобразованный запрос
-		"diff",             // разница
-		"rules",            // выбранная цепочка правил
-		"original_bytes",   // метрики до/после
+		"trace",           // ссылка на файлы трассировки
+		"rules",           // выбранная цепочка правил
+		"original_bytes",  // метрики до/после
 		"transformed_bytes",
 		"original_chars",
 		"transformed_chars",
-		"- ", // в diff есть удалённые строки
 	} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("в debug-логах нет %q; лог: %s", want, logs)
 		}
+	}
+	if strings.Contains(logs, "original_body") || strings.Contains(logs, `"diff"`) {
+		t.Errorf("тела и diff не должны попадать в лог (только в файлы трассировки); лог: %s", logs)
+	}
+}
+
+// TestTracerWritesReadableFiles — в debug-режиме с заданным trace_dir
+// исходное тело, результат и diff пишутся отдельными неэкранированными
+// файлами.
+func TestTracerWritesReadableFiles(t *testing.T) {
+	up := testhelpers.NewUpstream(nil)
+	manifest := "rules:\n  - key: \"sk-test\"\n    filter_inline: '.messages = (.messages | safe_truncate_blocks(1))'\n"
+	dir := t.TempDir()
+	srv, _ := newLoggedService(t, slog.LevelDebug, true, manifest, up, logging.NewTracer(dir))
+
+	body := chatBody(3)
+	_, _ = post(t, srv, "Bearer sk-test", body)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request, transformed, diff bool
+	for _, e := range entries {
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case strings.HasSuffix(e.Name(), "request.json"):
+			request = true
+			if !json.Valid(raw) {
+				t.Errorf("request.json не является валидным JSON: %s", raw)
+			}
+			if !strings.Contains(string(raw), `"model"`) || strings.Contains(string(raw), `\u`) {
+				t.Errorf("request.json должен быть неэкранированным JSON: %s", raw)
+			}
+		case strings.HasSuffix(e.Name(), "transformed.json"):
+			transformed = true
+			if !json.Valid(raw) {
+				t.Errorf("transformed.json не является валидным JSON: %s", raw)
+			}
+		case strings.HasSuffix(e.Name(), "diff.patch"):
+			diff = true
+			if !strings.Contains(string(raw), "- ") || !strings.Contains(string(raw), "+ ") {
+				t.Errorf("diff.patch должен содержать строки -/+; содержимое: %s", raw)
+			}
+		}
+	}
+	if !request || !transformed || !diff {
+		t.Fatalf("ожидались файлы request.json, transformed.json и diff.patch, найдено: %v", entries)
 	}
 }
 
 func TestNormalModeLogsOnlyErrors(t *testing.T) {
 	up := testhelpers.NewUpstream(nil)
 	manifest := "rules:\n  - key: \"sk-test\"\n    filter_inline: '.messages = (.messages | safe_truncate_blocks(1))'\n"
-	srv, buf := newLoggedService(t, slog.LevelError, false, manifest, up)
+	srv, buf := newLoggedService(t, slog.LevelError, false, manifest, up, nil)
 
 	// успешное преобразование — в обычном режиме логов быть не должно
 	_, _ = post(t, srv, "Bearer sk-test", chatBody(2))
@@ -654,7 +704,7 @@ func TestNormalModeLogsOnlyErrors(t *testing.T) {
 	// ошибка правила логируется на уровне Error
 	broken := strings.ReplaceAll(manifest, "safe_truncate_blocks(1)", "error(\"boom\")")
 	up2 := testhelpers.NewUpstream(nil)
-	srv2, buf2 := newLoggedService(t, slog.LevelError, false, broken, up2)
+	srv2, buf2 := newLoggedService(t, slog.LevelError, false, broken, up2, nil)
 	resp, body := post(t, srv2, "Bearer sk-test", chatBody(1))
 	if resp.StatusCode != 500 {
 		t.Fatalf("статус = %d; тело: %s", resp.StatusCode, body)

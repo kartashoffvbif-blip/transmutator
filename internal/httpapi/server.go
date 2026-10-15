@@ -28,6 +28,9 @@ type Handler struct {
 	Engine *transform.Engine
 	Logger *slog.Logger
 	Debug  bool
+	// Tracer при ненулевом значении пишет тела и diff каждого
+	// преобразования в отдельные файлы (см. logging.Tracer).
+	Tracer *logging.Tracer
 }
 
 // ServeHTTP маршрутизирует запрос: целевой (POST /v1/chat/completions)
@@ -114,8 +117,10 @@ func (h *Handler) handleTarget(w http.ResponseWriter, r *http.Request) {
 	h.Proxy.ForwardBody(w, r, out)
 }
 
-// debugTransform логирует в debug-режиме выбранную цепочку правил,
-// исходный и преобразованный запросы, их разницу и метрики до/после.
+// debugTransform в debug-режиме пишет тела и diff в файлы трассировки
+// (если задан Tracer) и короткую запись в лог: цепочка правил,
+// базовое имя файлов и метрики до/после. Сами тела в лог не попадают —
+// экранирование slog делает их нечитаемыми.
 func (h *Handler) debugTransform(chain []*transform.CompiledRule, original, transformed []byte) {
 	if !h.Debug {
 		return
@@ -124,16 +129,19 @@ func (h *Handler) debugTransform(chain []*transform.CompiledRule, original, tran
 	for i, cr := range chain {
 		names[i] = cr.Rule.Origin
 	}
-	h.Logger.Debug("преобразование выполнено",
+	args := []any{
 		"rules", names,
-		"original_body", string(original),
-		"transformed_body", string(transformed),
-		"diff", strings.Join(logging.Diff(prettyJSON(original), prettyJSON(transformed)), "\n"),
 		"original_bytes", len(original),
 		"transformed_bytes", len(transformed),
 		"original_chars", utf8.RuneCount(original),
 		"transformed_chars", utf8.RuneCount(transformed),
-	)
+	}
+	if base, err := h.Tracer.WriteTransform(original, transformed); err != nil {
+		h.Logger.Error("не удалось записать файлы трассировки", "err", err)
+	} else if base != "" {
+		args = append(args, "trace", base)
+	}
+	h.Logger.Debug("преобразование выполнено", args...)
 }
 
 func (h *Handler) debug(msg string, args ...any) {

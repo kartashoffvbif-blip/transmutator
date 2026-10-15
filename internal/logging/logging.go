@@ -1,23 +1,36 @@
-// Package logging — простая настройка структурированного логирования
-// на основе log/slog. В обычном режиме логируются только ошибки,
-// в режиме debug — всё, включая тела запросов.
+// Package logging — настройка структурированного логирования на основе
+// log/slog. В обычном режиме логируются только ошибки, в режиме debug —
+// всё. При заданном log_file логи дублируются в файл.
 package logging
 
 import (
+	"io"
 	"log/slog"
 	"os"
 	"strings"
 )
 
 // New создаёт логгер. При debug=true уровень логирования опускается
-// до Debug, иначе остаётся на уровне Error.
-func New(debug bool) *slog.Logger {
+// до Debug, иначе остаётся на уровне Error. Если logFile не пуст,
+// логи пишутся одновременно в stdout и в этот файл (дозапись).
+// Возвращённый closer закрывает файл; для чисто stdout-логгера он nil.
+func New(debug bool, logFile string) (*slog.Logger, io.Closer, error) {
 	level := slog.LevelError
 	if debug {
 		level = slog.LevelDebug
 	}
-	h := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	return slog.New(h)
+	out := io.Writer(os.Stdout)
+	var closer io.Closer
+	if logFile != "" {
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return nil, nil, err
+		}
+		out = io.MultiWriter(os.Stdout, f)
+		closer = f
+	}
+	h := slog.NewTextHandler(out, &slog.HandlerOptions{Level: level})
+	return slog.New(h), closer, nil
 }
 
 // Diff возвращает простое построчное различие двух текстов: общие

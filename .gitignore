@@ -2,3 +2,6 @@
 *.log
 config.yaml
 rules.yaml
+.vscode/
+logs/
+my_rules/

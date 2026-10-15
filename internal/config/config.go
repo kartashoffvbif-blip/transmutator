@@ -19,6 +19,8 @@ type Config struct {
 	Timeout     time.Duration // таймаут на выполнение одного правила
 	Debug       bool          // подробное логирование
 	RulesFile   string        // путь к манифесту правил
+	LogFile     string        // файл для дубля логов; пусто = только stdout
+	TraceDir    string        // каталог файлов трассировки; пусто = выключено
 }
 
 // rawConfig — конфигурация в том виде, в каком она лежит в YAML.
@@ -28,6 +30,8 @@ type rawConfig struct {
 	Timeout     string `yaml:"timeout"`
 	Debug       bool   `yaml:"debug"`
 	RulesFile   string `yaml:"rules_file"`
+	LogFile     string `yaml:"log_file"`
+	TraceDir    string `yaml:"trace_dir"`
 }
 
 // Load читает и валидирует конфигурационный файл.
@@ -77,5 +81,7 @@ func build(rc rawConfig) (*Config, error) {
 		Timeout:     d,
 		Debug:       rc.Debug,
 		RulesFile:   rc.RulesFile,
+		LogFile:     rc.LogFile,
+		TraceDir:    rc.TraceDir,
 	}, nil
 }
